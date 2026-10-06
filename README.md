@@ -1,5 +1,7 @@
 # RAT — Repo Analysis Tool
 
+**Student:** Inga Dlamini · **Student number:** 2720510
+
 A web dashboard that ingests git repositories and exposes their evolution metrics — file, directory,
 repository, commit-set and author — through an interactive, filterable UI.
 
