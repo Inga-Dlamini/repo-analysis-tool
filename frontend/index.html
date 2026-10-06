@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RAT — Repo Analysis Tool</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📊</text></svg>">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<aside class="sidebar">
+  <div class="brand">
+    <div class="logo">◧</div>
+    <div>
+      <h1>RAT</h1>
+      <p>Repo Analysis Tool</p>
+    </div>
+  </div>
+  <button id="btn-add-repo" class="btn primary block">+ Add repository</button>
+  <div id="repo-list" class="repo-list"></div>
+  <div class="sidebar-foot">Metrics computed on non-merge commits · rename detection at 50%</div>
+</aside>
+
+<main class="main">
+  <header class="topbar">
+    <div class="topbar-left">
+      <h2 id="repo-title">No repository selected</h2>
+      <span id="repo-status" class="badge hidden"></span>
+    </div>
+    <nav class="tabs" id="tabs">
+      <button class="tab active" data-tab="dashboard">Dashboard</button>
+      <button class="tab" data-tab="authors">Authors</button>
+      <button class="tab" data-tab="compare">Compare</button>
+    </nav>
+    <div class="topbar-actions">
+      <button id="btn-export" class="btn ghost" title="Export the current dashboard as CSV">Export CSV</button>
+      <button id="btn-refresh" class="btn ghost" title="Fetch new commits (cloned repos)">Refresh</button>
+      <button id="btn-rebuild" class="btn ghost" title="Re-parse the full history">Rebuild</button>
+      <button id="btn-delete" class="btn danger" title="Remove this repository and its data">Delete</button>
+    </div>
+  </header>
+
+  <section id="filters" class="filters hidden">
+    <div class="filter-group">
+      <label>Reference</label>
+      <div class="inline">
+        <select id="ref-select" title="Analysis reference commit"></select>
+        <input id="ref-custom" class="input hidden" placeholder="branch / tag / hash" spellcheck="false">
+        <button id="ref-custom-toggle" class="btn ghost small" title="Use a custom ref">⌨</button>
+      </div>
+    </div>
+
+    <div class="filter-group">
+      <label>Authors</label>
+      <button id="author-filter-btn" class="btn select-like">All authors ▾</button>
+      <div id="author-filter-pop" class="popover hidden"></div>
+    </div>
+
+    <div class="filter-group">
+      <label>Period</label>
+      <div class="inline">
+        <div class="seg" id="range-quick">
+          <button data-days="0" class="active">All</button>
+          <button data-days="365">1y</button>
+          <button data-days="180">6m</button>
+          <button data-days="90">90d</button>
+          <button data-days="30">30d</button>
+          <button data-days="7">7d</button>
+        </div>
+        <input type="datetime-local" id="ts-from" class="input dt" title="From (inclusive)">
+        <span class="dash">–</span>
+        <input type="datetime-local" id="ts-to" class="input dt" title="Until (exclusive)">
+      </div>
+    </div>
+
+    <div class="filter-group">
+      <label>Commit set</label>
+      <div class="seg" id="commit-mode">
+        <button data-mode="range" class="active" title="All commits in the period">Time range</button>
+        <button data-mode="manual" title="A manually selected list of commits">Manual</button>
+      </div>
+    </div>
+
+    <div class="filter-group grow">
+      <label>Path scope</label>
+      <div class="inline">
+        <div id="path-breadcrumb" class="breadcrumb"></div>
+        <button id="btn-pick-path" class="btn ghost small">Choose…</button>
+        <button id="btn-clear-path" class="btn ghost small hidden">Clear</button>
+      </div>
+    </div>
+  </section>
+
+  <div id="loading" class="loading-bar hidden"><div class="loading-fill"></div></div>
+
+  <section id="content" class="content">
+
+    <div id="hero" class="hero">
+      <h2>Analyse git repositories</h2>
+      <p>Upload a zip of a repository (including its <code>.git</code> directory) or clone one from a URL.
+         Then explore file, directory, repository, commit-set and author metrics through filters and charts.</p>
+      <button class="btn primary" id="btn-add-repo-hero">+ Add your first repository</button>
+    </div>
+
+    <div id="page-dashboard" class="page hidden">
+      <div class="kpis" id="kpis"></div>
+      <div id="scope-host" class="scope-host"></div>
+
+      <div class="grid-2">
+        <section class="card">
+          <h3>Activity <span id="timeline-note" class="hint"></span></h3>
+          <div id="chart-timeline" class="chart"></div>
+        </section>
+        <section class="card">
+          <h3>Churn treemap <span class="hint">size = churn · click a tile to drill down</span></h3>
+          <div id="chart-treemap" class="chart treemap"></div>
+        </section>
+      </div>
+
+      <div class="grid-2">
+        <section class="card">
+          <h3>Authors <span class="hint">ownership of churn</span></h3>
+          <div id="table-authors"></div>
+        </section>
+        <section class="card">
+          <h3>Top files <span class="hint">by churn · click for details</span></h3>
+          <div id="table-files"></div>
+        </section>
+      </div>
+
+      <section class="card">
+        <h3>Top directories <span class="hint">by churn · click for details</span></h3>
+        <div id="table-dirs"></div>
+      </section>
+
+      <section class="card">
+        <h3>Commits <span id="selection-info" class="hint"></span></h3>
+        <div class="commit-tools">
+          <input id="commit-search" class="input" placeholder="search subject or hash…" spellcheck="false">
+          <button id="btn-select-filtered" class="btn ghost small" title="Select every commit matching the current author/period filters (max 5000)">Select all filtered</button>
+          <button id="btn-apply-selection" class="btn primary small" disabled>Use selected commits</button>
+          <button id="btn-clear-selection" class="btn ghost small" disabled>Clear selection</button>
+        </div>
+        <div id="table-commits"></div>
+        <div id="commit-pager" class="pager"></div>
+      </section>
+    </div>
+
+    <div id="page-authors" class="page hidden">
+      <section class="card">
+        <h3>Author identities</h3>
+        <p class="hint">Identities are resolved through the repository's <code>.mailmap</code> during ingestion.
+           Select two or more identities to merge them manually (for example when a developer used several emails).</p>
+        <div class="merge-panel">
+          <input id="merge-name" class="input" placeholder="Name for the merged author…" spellcheck="false">
+          <button id="btn-merge-authors" class="btn primary" disabled>Merge selected</button>
+          <span id="merge-count" class="hint"></span>
+        </div>
+        <div id="suggestions"></div>
+        <div id="table-identities"></div>
+      </section>
+      <section class="card">
+        <h3>Merged authors</h3>
+        <div id="table-groups"></div>
+      </section>
+    </div>
+
+    <div id="page-compare" class="page hidden">
+      <section class="card">
+        <h3>Repositories at a glance</h3>
+        <div id="table-compare"></div>
+      </section>
+    </div>
+
+  </section>
+</main>
+
+<div id="drawer" class="drawer hidden" aria-modal="true"></div>
+<div id="modal-root"></div>
+<div id="toasts" class="toasts"></div>
+
+<script type="module" src="/static/js/app.js"></script>
+</body>
+</html>
