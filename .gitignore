@@ -1,0 +1,17 @@
+# Runtime data (ingested repositories, SQLite database, uploads)
+data/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# Scratch / local experiments
+.scratch/
+.aicoding-chat-workspace
+
+# OS / editor
+.DS_Store
+*.swp
