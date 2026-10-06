@@ -18,10 +18,16 @@ Wire format notes (verified against git 2.43, stable since ~2.9):
   commit has diff entries it is followed by a literal ``\\n`` (the usual
   blank line between the commit header and the diffstat section).
 * A normal numstat record is ``<added>\\t<deleted>\\t<path>\\0``.  Binary
-  files use ``-`` for both counters (not measured per the brief).
+  files use ``-`` for both counters; they carry no line statistics but are
+  still recorded as inventory rows (0, 0) so the path is listed with zero
+  metrics (metrics.py excludes such rows from modification counts).
 * A rename record is ``<added>\\t<deleted>\\t\\0<old-path>\\0<new-path>\\0``
   — the path field is empty and the following two NUL separated tokens are
-  the old and new path.  Changes are attributed to the new path.
+  the old and new path.  Changes (including pure renames with 0/0) are
+  attributed to the new path.
+* Rows with zero line impact (pure renames, mode-only changes, binary
+  replacements) never count as modifications anywhere; they only widen the
+  file inventory.
 * Commits with no measurable diff (empty commits, merges) simply carry no
   numstat records.
 * ``%aN``/``%aE`` always resolve identities through ``.mailmap``; passing
@@ -40,7 +46,7 @@ import tempfile
 from dataclasses import dataclass, field
 
 # Bump when parsing logic changes in a way that invalidates stored data.
-PARSER_VERSION = 1
+PARSER_VERSION = 2
 
 FIELD_SEP = b"\x1f"
 FORMAT = "%H%x1f%P%x1f%ct%x1f%aN%x1f%aE%x1f%s"
@@ -68,7 +74,9 @@ class ParsedFile:
     old_path: str | None = None  # set for renames
 
     @property
-    def touched(self) -> bool:
+    def measured(self) -> bool:
+        """False for inventory-only rows (binary files, pure renames,
+        mode-only changes): the path is listed but has no line statistics."""
         return (self.added + self.removed) > 0
 
 
@@ -138,7 +146,7 @@ class LogParser:
         if self._pending_rename:
             self._rename_paths.append(_dec(tok))
             if len(self._rename_paths) == 2:
-                if self._rename_file is not None and self._rename_file.touched:
+                if self._rename_file is not None:
                     self._rename_file.old_path, self._rename_file.path = self._rename_paths
                     assert self._commit is not None
                     self._commit.files.append(self._rename_file)
@@ -157,20 +165,21 @@ class LogParser:
         a_raw, r_raw, path = m.group(1), m.group(2), m.group(3)
         binary = a_raw == b"-" or r_raw == b"-"
         if path == b"":
-            # Rename header: the next two tokens are old and new path.
+            # Rename header: the next two tokens are old and new path.  Binary
+            # renames are kept too (0, 0): the new path joins the inventory.
             self._pending_rename = True
             self._rename_paths = []
             if binary:
-                self._rename_file = None
+                self._rename_file = ParsedFile("", 0, 0)
             else:
                 self._rename_file = ParsedFile("", int(a_raw), int(r_raw))
             return
-        if binary:
-            return
-        added, removed = int(a_raw), int(r_raw)
-        if added + removed == 0:
-            return  # e.g. mode-only changes: no line impact
+        added, removed = (0, 0) if binary else (int(a_raw), int(r_raw))
         assert self._commit is not None
+        # Binary files and zero-impact rows (pure renames, mode-only changes)
+        # have no line statistics; they are still recorded so the path is
+        # listed with zero metrics, and metrics.py keeps them out of every
+        # modification count.
         self._commit.files.append(ParsedFile(_dec(path), added, removed))
 
     def _start(self, tok: bytes) -> None:

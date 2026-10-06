@@ -30,7 +30,7 @@ def test_summary_and_repository_metrics(conn, repo_id):
     assert s["added"] == 26
     assert s["removed"] == 6
     assert s["authors"] == 3                 # mailmap collapses the legacy identity
-    assert s["files_touched"] == 8           # binary / pure-rename paths never appear
+    assert s["files_touched"] == 9           # inventoried paths incl. binary / pure renames
     assert s["ts_min"] == ts(1)
     assert s["ts_max"] == ts(10)
 
@@ -64,8 +64,10 @@ def test_top_files_order_and_values(conn, repo_id):
         "feature/notes.md",      # +3    churn 3
         "src2/z.txt",            # +2    churn 2
         "src/deep/d.txt",        # +1    churn 1 (post-rename modifications)
+        "assets/logo.bin",       # 0     inventoried, never measured
     ]
     by_path = {r["path"]: r for r in rows}
+    assert by_path["assets/logo.bin"]["modifications"] == 0
     assert (by_path["src/a.txt"]["added"], by_path["src/a.txt"]["removed"]) == (5, 1)
     assert by_path["src/a.txt"]["modifications"] == 2
     assert by_path["src/a.txt"]["modification_frequency"] == pytest.approx(2 / 9)
@@ -75,8 +77,11 @@ def test_top_files_order_and_values(conn, repo_id):
 
 def test_top_dirs_recursive_sums_and_root_excluded(conn, repo_id):
     rows = dash(conn, repo_id)["top_dirs"]
-    assert [r["path"] for r in rows] == ["src", "src/deep", "docs", "feature", "src2"]
+    assert [r["path"] for r in rows] == ["src", "src/deep", "docs", "feature", "src2", "assets"]
     assert "" not in {r["path"] for r in rows}          # repository metrics are separate
+
+    assets = next(r for r in rows if r["path"] == "assets")
+    assert (assets["churn"], assets["modifications"]) == (0, 0)
 
     src = next(r for r in rows if r["path"] == "src")
     assert (src["added"], src["removed"]) == (15, 5)    # a(5/1) + b(4/4) + c(5/0) + d(1/0)
@@ -112,8 +117,8 @@ def test_rename_binary_and_deletion_storage(conn, repo_id, synth_repo):
             )
         }
 
-    # c4: the pure rename plus the binary file produced no measurable change
-    assert rows(h["c4"]) == {}
+    # c4: the pure rename and the binary file are inventoried with zero counts
+    assert rows(h["c4"]) == {"src/deep/d.txt": (0, 0), "assets/logo.bin": (0, 0)}
     # the old path keeps its own pre-rename history but records nothing at the rename
     old = conn.execute(
         "SELECT COUNT(*) AS n FROM file_changes"
@@ -122,12 +127,12 @@ def test_rename_binary_and_deletion_storage(conn, repo_id, synth_repo):
     ).fetchone()["n"]
     assert old == 0
     assert rows(h["c5"]) == {"src/deep/d.txt": (1, 0)}
-    # binary file is not measured
+    # the binary file has no line statistics at all
     binary = conn.execute(
-        "SELECT COUNT(*) AS n FROM file_changes WHERE repo_id=? AND path LIKE 'assets/%'",
+        "SELECT added, removed FROM file_changes WHERE repo_id=? AND path LIKE 'assets/%'",
         (repo_id,),
-    ).fetchone()["n"]
-    assert binary == 0
+    ).fetchall()
+    assert [(r["added"], r["removed"]) for r in binary] == [(0, 0)]
     # deletion is recorded as removed lines on its path
     assert rows(h["c6"]) == {"src/b.txt": (0, 4)}
 
@@ -172,7 +177,7 @@ def test_time_range_is_half_open(conn, repo_id):
 
 def test_author_filter(conn, repo_id):
     d = dash(conn, repo_id, authors=[BOB])
-    assert d["summary"]["commit_count"] == 3          # c2, c4 (empty diff), c6
+    assert d["summary"]["commit_count"] == 3          # c2, c4 (rename+binary only), c6
     assert (d["summary"]["added"], d["summary"]["removed"]) == (6, 5)
     assert d["repo_metrics"]["growth"] == 1
 
@@ -216,9 +221,10 @@ def test_author_rows_and_ownership(conn, repo_id):
     authors = {a["name"]: a for a in d["authors"]}
     assert set(authors) == {ALICE, BOB, ROBERT}
 
-    assert authors[ALICE]["commits"] == 5
+    assert authors[ALICE]["commits"] == 4              # c8 is empty: no author credit
     assert (authors[ALICE]["added"], authors[ALICE]["removed"]) == (17, 1)
     assert authors[ALICE]["churn"] == 18
+    assert authors[BOB]["commits"] == 2                # c4 is inventory-only
     assert authors[BOB]["churn"] == 11
     assert authors[ROBERT]["churn"] == 3
 
@@ -262,10 +268,11 @@ def test_path_filter_scopes_objects_but_not_repo_metrics(conn, repo_id, synth_re
     assert (scoped[ALICE]["added"], scoped[ALICE]["removed"]) == (9, 0)
     assert scoped[ALICE]["ownership"] == pytest.approx(9 / 20)
 
-    # history rows for the scope, newest first: c6, c5, c3, c2 (x2 files), c1
+    # history rows for the scope, newest first: c6, c5, c4 (rename row), c3,
+    # c2 (x2 files), c1 — inventory-only rows still carry history
     hist = scope["history"]
     assert [r["hash"] for r in hist] == [
-        h["c6"], h["c5"], h["c3"], h["c2"], h["c2"], h["c1"],
+        h["c6"], h["c5"], h["c4"], h["c3"], h["c2"], h["c2"], h["c1"],
     ]
 
     # repository metrics stay H-wide by design (root directory == whole repo)
@@ -287,10 +294,11 @@ def test_path_filter_file_scope(conn, repo_id):
 def test_tree_children(conn, repo_id):
     root = metrics.tree_children(conn, repo_id, {"ref": "HEAD"})
     by_name = {c["name"]: c for c in root["children"]}
-    assert set(by_name) == {"src", "docs", "feature", "src2", "README.md"}
+    assert set(by_name) == {"src", "docs", "feature", "src2", "README.md", "assets"}
     assert by_name["src"]["type"] == "dir"
     assert by_name["src"]["churn"] == 20
     assert by_name["README.md"]["type"] == "file"
+    assert (by_name["assets"]["churn"], by_name["assets"]["modifications"]) == (0, 0)
 
     src = metrics.tree_children(conn, repo_id, {"ref": "HEAD", "path": "src"})
     kids = {c["name"]: c for c in src["children"]}
@@ -311,7 +319,7 @@ def test_object_detail(conn, repo_id, synth_repo):
     d = metrics.object_detail(conn, repo_id, {"ref": "HEAD", "path": "src/deep"})
     assert d["dir"]["churn"] == 6
     assert d["file"] is None
-    assert [r["hash"] for r in d["history"]] == [h["c5"], h["c3"]]
+    assert [r["hash"] for r in d["history"]] == [h["c5"], h["c4"], h["c3"]]
 
     with pytest.raises(metrics.BadRequest):
         metrics.object_detail(conn, repo_id, {"ref": "HEAD"})
@@ -362,7 +370,7 @@ def test_authors_overview_merge_and_unmerge(conn, repo_id):
         d = dash(conn, repo_id)
         authors = {a["name"]: a for a in d["authors"]}
         assert set(authors) == {ALICE, BOB}
-        assert authors[BOB]["commits"] == 4                # c2, c4, c6, b7
+        assert authors[BOB]["commits"] == 3                # c2, c6, b7 (c4 inventoried only)
         assert authors[BOB]["churn"] == 14
         assert authors[BOB]["ownership"] == pytest.approx(14 / 32)
         assert d["summary"]["authors"] == 2

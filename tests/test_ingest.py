@@ -24,7 +24,7 @@ def test_ingest_records_repo_metadata(conn, repo_id, synth_repo):
     assert row["head"] == synth_repo["hashes"]["head"]
     assert row["commit_parsed"] == 9
     assert row["commit_total"] == 9
-    assert row["file_count"] == 8
+    assert row["file_count"] == 9
     assert row["author_count"] == 3
     assert row["parser_version"] == PARSER_VERSION
 

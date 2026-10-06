@@ -40,7 +40,7 @@ def parse(data: bytes) -> list[ParsedCommit]:
 
 
 def test_parser_version_is_pinned():
-    assert PARSER_VERSION == 1
+    assert PARSER_VERSION == 2
 
 
 def test_basic_commit_with_two_files():
@@ -93,7 +93,7 @@ def test_rename_with_changes_is_attributed_to_new_path():
     assert (f.old_path, f.path, f.added, f.removed) == ("old/name.txt", "new/name.txt", 2, 1)
 
 
-def test_pure_rename_is_consumed_but_not_measured():
+def test_pure_rename_is_inventoried_without_line_stats():
     data = stream(
         header(H1),
         b"\n0\t0\t",
@@ -103,11 +103,15 @@ def test_pure_rename_is_consumed_but_not_measured():
         header(H2),
     )
     commits = parse(data)
-    assert [(f.path, f.added, f.removed) for f in commits[0].files] == [("kept.txt", 3, 0)]
+    renamed, kept = commits[0].files
+    assert (renamed.old_path, renamed.path) == ("old.txt", "new.txt")
+    assert (renamed.added, renamed.removed) == (0, 0)
+    assert not renamed.measured
+    assert (kept.path, kept.added, kept.removed) == ("kept.txt", 3, 0)
     assert [c.hash for c in commits] == [H1, H2]
 
 
-def test_binary_entries_are_skipped():
+def test_binary_entries_are_inventoried_without_line_stats():
     data = stream(
         header(H1),
         b"\n-\t-\tassets/logo.png",
@@ -115,10 +119,13 @@ def test_binary_entries_are_skipped():
         header(H2),
     )
     commits = parse(data)
-    assert [(f.path, f.added, f.removed) for f in commits[0].files] == [("code.py", 2, 0)]
+    assert [(f.path, f.added, f.removed) for f in commits[0].files] == [
+        ("assets/logo.png", 0, 0),
+        ("code.py", 2, 0),
+    ]
 
 
-def test_binary_rename_is_skipped_without_breaking_the_stream():
+def test_binary_rename_is_inventoried_without_breaking_the_stream():
     data = stream(
         header(H1),
         b"\n-\t-\t",
@@ -128,14 +135,20 @@ def test_binary_rename_is_skipped_without_breaking_the_stream():
         header(H2),
     )
     commits = parse(data)
-    assert [(f.path, f.added, f.removed) for f in commits[0].files] == [("text.txt", 1, 1)]
+    renamed, text = commits[0].files
+    assert (renamed.old_path, renamed.path) == ("old.bin", "new.bin")
+    assert (renamed.added, renamed.removed) == (0, 0)
+    assert (text.path, text.added, text.removed) == ("text.txt", 1, 1)
     assert [c.hash for c in commits] == [H1, H2]
 
 
-def test_zero_change_record_is_skipped():
+def test_zero_change_record_is_inventoried_without_line_stats():
     data = stream(header(H1), b"\n0\t0\tmode-only.sh", b"4\t2\treal.txt", header(H2))
     commits = parse(data)
-    assert [(f.path, f.added, f.removed) for f in commits[0].files] == [("real.txt", 4, 2)]
+    assert [(f.path, f.added, f.removed) for f in commits[0].files] == [
+        ("mode-only.sh", 0, 0),
+        ("real.txt", 4, 2),
+    ]
 
 
 def test_unknown_records_are_tolerated():
@@ -197,8 +210,8 @@ def test_iter_log_on_synthetic_repo(synth_repo):
 
     files = lambda hs: [(f.path, f.added, f.removed) for f in by_hash[h[hs]].files]
     assert sorted(files("c1")) == [("README.md", 2, 0), ("src/a.txt", 3, 0)]
-    # c4: pure rename (0/0) + binary -> nothing measurable
-    assert by_hash[h["c4"]].files == []
+    # c4: pure rename (0/0) + binary are inventoried with zero line stats
+    assert sorted(files("c4")) == [("assets/logo.bin", 0, 0), ("src/deep/d.txt", 0, 0)]
     # c6: deletion recorded as removed lines on its path
     assert files("c6") == [("src/b.txt", 0, 4)]
     # c5: changes after a rename are attributed to the new path

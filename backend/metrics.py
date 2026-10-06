@@ -220,12 +220,15 @@ def _fetch_change_rows(conn, scope: HScope, path: str):
 def _rollup(rows) -> tuple[dict, dict]:
     """Roll file change rows up to per-file and per-directory aggregates
     ([added, removed, modifications]); directories include the whole subtree
-    and '' is the repository root.  Modifications count distinct commits."""
+    and '' is the repository root.  Modifications count distinct commits with
+    a measurable change: inventory-only rows (binary files, pure renames,
+    mode-only changes) widen the listing but never increment a count."""
     files: dict[str, list] = {}
     dirs: dict[str, list] = {}
     cur_commit = None
     touched: set[str] = set()
     for commit_hash, path, added, removed in rows:
+        measured = (added + removed) > 0
         if commit_hash != cur_commit:
             for d in touched:
                 dirs[d][2] += 1
@@ -236,7 +239,8 @@ def _rollup(rows) -> tuple[dict, dict]:
             agg = files[path] = [0, 0, 0]
         agg[0] += added
         agg[1] += removed
-        agg[2] += 1
+        if measured:
+            agg[2] += 1
         cut = path.rfind("/")
         while cut != -1:
             key = path[:cut]
@@ -245,14 +249,16 @@ def _rollup(rows) -> tuple[dict, dict]:
                 entry = dirs[key] = [0, 0, 0]
             entry[0] += added
             entry[1] += removed
-            touched.add(key)
+            if measured:
+                touched.add(key)
             cut = path.rfind("/", 0, cut)
         entry = dirs.get("")
         if entry is None:
             entry = dirs[""] = [0, 0, 0]
         entry[0] += added
         entry[1] += removed
-        touched.add("")
+        if measured:
+            touched.add("")
     for d in touched:
         dirs[d][2] += 1
     return files, dirs
@@ -285,10 +291,11 @@ def _summary(conn, scope: HScope) -> dict:
         return summary
     authors = conn.execute(
         f"""SELECT COUNT(DISTINCT COALESCE(al.canonical, c.author_key)) AS n
-            FROM commits c
+            FROM file_changes fc
+            JOIN commits c ON c.repo_id = fc.repo_id AND c.hash = fc.commit_hash
             LEFT JOIN author_aliases al ON al.repo_id = c.repo_id AND al.author_key = c.author_key
-            WHERE {where_sql}""",
-        where_params,
+            WHERE fc.repo_id = ? AND (fc.added + fc.removed) > 0 AND {where_sql}""",
+        [scope.repo_id, *where_params],
     ).fetchone()["n"]
     touched = conn.execute(
         f"""SELECT COUNT(DISTINCT fc.path) AS files
@@ -319,18 +326,22 @@ def _timeline(conn, scope: HScope, ts_min: int | None, ts_max: int | None) -> di
 
 
 def _authors_repo(conn, scope: HScope, total_churn: int) -> list[dict]:
+    """Per-author rows for H.  `commits` counts commits with a measurable
+    change (inventory-only commits never carry author credit); authors without
+    any measurable change are omitted, matching the reference datasets."""
     where_sql, where_params = scope.where("c")
     rows = conn.execute(
         f"""SELECT COALESCE(al.canonical, c.author_key) AS name,
-                   COUNT(*) AS commits,
-                   COALESCE(SUM(c.added), 0) AS added,
-                   COALESCE(SUM(c.removed), 0) AS removed,
+                   COUNT(DISTINCT c.hash) AS commits,
+                   COALESCE(SUM(fc.added), 0) AS added,
+                   COALESCE(SUM(fc.removed), 0) AS removed,
                    MIN(c.ts) AS first_ts, MAX(c.ts) AS last_ts
-            FROM commits c
+            FROM file_changes fc
+            JOIN commits c ON c.repo_id = fc.repo_id AND c.hash = fc.commit_hash
             LEFT JOIN author_aliases al ON al.repo_id = c.repo_id AND al.author_key = c.author_key
-            WHERE {where_sql}
+            WHERE fc.repo_id = ? AND (fc.added + fc.removed) > 0 AND {where_sql}
             GROUP BY name""",
-        where_params,
+        [scope.repo_id, *where_params],
     ).fetchall()
     out = []
     for r in rows:
@@ -361,7 +372,7 @@ def _authors_object(conn, scope: HScope, path: str, total_churn: int) -> list[di
             FROM file_changes fc
             JOIN commits c ON c.repo_id = fc.repo_id AND c.hash = fc.commit_hash
             LEFT JOIN author_aliases al ON al.repo_id = c.repo_id AND al.author_key = c.author_key
-            WHERE fc.repo_id = ? {prefix_sql} AND {where_sql}
+            WHERE fc.repo_id = ? {prefix_sql} AND (fc.added + fc.removed) > 0 AND {where_sql}
             GROUP BY name""",
         [scope.repo_id, *prefix_params, *where_params],
     ).fetchall()
@@ -576,6 +587,7 @@ def tree_children(conn, repo_id: int, payload: dict) -> dict:
     touched: set[str] = set()
     base = path + "/" if path else ""
     for commit_hash, full_path, added, removed in rows:
+        measured = (added + removed) > 0
         if commit_hash != cur_commit:
             for d in touched:
                 child_dirs[d][2] += 1
@@ -589,7 +601,8 @@ def tree_children(conn, repo_id: int, payload: dict) -> dict:
                 entry = child_files[rel] = [0, 0, 0]
             entry[0] += added
             entry[1] += removed
-            entry[2] += 1
+            if measured:
+                entry[2] += 1
         else:
             name = rel[:cut]
             entry = child_dirs.get(name)
@@ -597,7 +610,8 @@ def tree_children(conn, repo_id: int, payload: dict) -> dict:
                 entry = child_dirs[name] = [0, 0, 0]
             entry[0] += added
             entry[1] += removed
-            touched.add(name)
+            if measured:
+                touched.add(name)
     for d in touched:
         child_dirs[d][2] += 1
 
@@ -708,11 +722,13 @@ def search_objects(conn, repo_id: int, query: str) -> dict:
 
 def authors_overview(conn, repo_id: int) -> dict:
     rows = conn.execute(
-        """SELECT c.author_key, COUNT(*) AS commits,
-                  COALESCE(SUM(c.added), 0) AS added,
-                  COALESCE(SUM(c.removed), 0) AS removed,
+        """SELECT c.author_key, COUNT(DISTINCT c.hash) AS commits,
+                  COALESCE(SUM(fc.added), 0) AS added,
+                  COALESCE(SUM(fc.removed), 0) AS removed,
                   MIN(c.ts) AS first_ts, MAX(c.ts) AS last_ts
-           FROM commits c WHERE c.repo_id = ?
+           FROM file_changes fc
+           JOIN commits c ON c.repo_id = fc.repo_id AND c.hash = fc.commit_hash
+           WHERE fc.repo_id = ? AND (fc.added + fc.removed) > 0
            GROUP BY c.author_key ORDER BY c.author_key""",
         (repo_id,),
     ).fetchall()
