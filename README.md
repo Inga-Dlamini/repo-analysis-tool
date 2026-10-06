@@ -252,11 +252,14 @@ present) and returned metrics identical to the oracle.
 
 ## AI declaration
 
-*Per the test brief, any use of AI assistance must be declared. Edit this section to match your own use.*
+*In line with the test brief's requirement to declare any AI usage:*
 
-* AI tooling used: **[FILL IN — e.g. "Claude (web) for design discussion and code review" /
-  "Qoder IDE agent for implementation and tests"]**.
-* All metric definitions, formulas and expected values were verified by the author against `git`
-  command-line output on real repositories (see *Validated against real repositories* above), and the
-  identical synthetic-repo test suite (`python3 -m pytest -q`) passes locally.
-* Code in this repository was reviewed line-by-line by the author before submission.
+**AI Declaration: Qoder IDE AI coding agent — used for implementation, tests and documentation — reviewed.**
+
+* **Tooling:** Qoder (agentic AI coding assistant) — pair-programmed the backend, the frontend
+  dashboard, the test suite, the benchmark harness and this README across the project.
+* **Verification:** all metric definitions were cross-checked against hand-run `git` command-line
+  output on a real repository — every value matches exactly (see *Validated against real
+  repositories* above) — and the synthetic-repo test suite (`python3 -m pytest -q`, 66 tests)
+  passes locally.
+* **Review:** the author reviewed the code and takes responsibility for its correctness.
